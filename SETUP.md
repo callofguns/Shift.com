@@ -18,8 +18,9 @@ You'll need:
 Open **Terminal** (Mac) or **PowerShell** (Windows), then run these one at a time:
 
 ```bash
-git clone https://github.com/callofguns/shift.com.git
-cd shift.com
+git clone https://github.com/callofguns/Shift.com.git
+cd Shift.com
+git checkout build-shift-app   # skip this line once the app is merged into main
 npm install
 cd functions
 npm install
