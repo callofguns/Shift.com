@@ -1,0 +1,111 @@
+rules_version = '2';
+
+// Who can read and change what.
+// - Everyone signed in can see the schedule.
+// - Only managers can change shifts, time off, the team and settings.
+// - Employees can send requests and cancel their own pending ones.
+// - PINs and the change log are only touched by the server (Cloud Functions).
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function me() {
+      return request.auth.token.memberId;
+    }
+
+    function myMember() {
+      return get(/databases/$(database)/documents/members/$(me())).data;
+    }
+
+    function signedIn() {
+      return request.auth != null
+        && request.auth.token.memberId is string
+        && myMember().active == true;
+    }
+
+    function isManager() {
+      return signedIn() && myMember().role == 'manager';
+    }
+
+    function isDate(v) {
+      return v is string && v.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$');
+    }
+
+    function isTime(v) {
+      return v is string && v.matches('^[0-2][0-9]:[0-5][0-9]$');
+    }
+
+    // Every manager write must say who made it, so the change log is accurate.
+    function stamped() {
+      return request.resource.data.updatedBy == me()
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    match /members/{memberId} {
+      allow read: if signedIn();
+      allow create, update: if isManager();
+      // People can change their own notification setting.
+      allow update: if signedIn() && memberId == me()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['notify']);
+    }
+
+    match /settings/{doc} {
+      allow read: if signedIn();
+      allow write: if isManager();
+    }
+
+    match /shifts/{shiftId} {
+      allow read: if signedIn();
+      allow create, update: if isManager() && stamped()
+        && (request.resource.data.memberId == null || request.resource.data.memberId is string)
+        && isDate(request.resource.data.date)
+        && isTime(request.resource.data.start)
+        && isTime(request.resource.data.end)
+        && request.resource.data.end > request.resource.data.start
+        && request.resource.data.deleted is bool;
+      // Shifts are never truly deleted; they are marked deleted so history stays.
+      allow delete: if false;
+    }
+
+    match /timeOff/{id} {
+      allow read: if signedIn();
+      allow create, update: if isManager() && stamped()
+        && isDate(request.resource.data.startDate)
+        && isDate(request.resource.data.endDate)
+        && request.resource.data.endDate >= request.resource.data.startDate;
+      allow delete: if false;
+    }
+
+    match /requests/{id} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.memberId == me()
+        && request.resource.data.status == 'pending'
+        && request.resource.data.type in ['change', 'drop', 'timeoff', 'pickup', 'swap']
+        && (request.resource.data.type != 'swap' || request.resource.data.swapWithMemberId != me());
+      // Managers approve or deny.
+      allow update: if isManager() && resource.data.type != 'swap';
+      // You can cancel your own request while it is still waiting.
+      allow update: if signedIn()
+        && resource.data.memberId == me()
+        && resource.data.status == 'pending'
+        && request.resource.data.status == 'cancelled'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'decidedAt', 'decidedBy']);
+    }
+
+    match /changes/{id} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    // One document per phone/computer that has notifications turned on.
+    match /devices/{deviceId} {
+      allow create, update: if signedIn() && request.resource.data.memberId == me();
+      allow delete: if signedIn() && resource.data.memberId == me();
+    }
+
+    // Everything else (like PINs) is server-only.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
